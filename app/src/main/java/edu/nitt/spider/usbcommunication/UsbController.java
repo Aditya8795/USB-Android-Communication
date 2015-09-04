@@ -1,6 +1,6 @@
 package edu.nitt.spider.usbcommunication;
 
-        import android.app.Activity;
+import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -25,7 +25,45 @@ public class UsbController {
     private final IUsbConnectionHandler mConnectionHandler;
     private final int VID;
     private final int PID;
-    protected static final String ACTION_USB_PERMISSION = "ch.serverbox.android.USB";
+    protected static final String ACTION_USB_PERMISSION = "edu.nitt.spider.usbcommunication.USBPermission";
+
+
+    private interface IPermissionListener {
+        void onPermissionDenied(UsbDevice d);
+    }
+    private BroadcastReceiver mPermissionReceiver = new PermissionReceiver(
+            new IPermissionListener() {
+                @Override
+                public void onPermissionDenied(UsbDevice d) {
+                    l("Permission denied on " + d.getDeviceId());
+                }
+            }
+    );
+
+    public final static String TAG = "USBController";
+
+    private void l(Object msg) {
+        Log.d(TAG, ">==< " + msg.toString() + " >==<");
+    }
+
+    private void e(Object msg) {
+        Log.e(TAG, ">==< " + msg.toString() + " >==<");
+    }
+
+    // This listens for the MCU getting detached
+    BroadcastReceiver mUsbReceiver = new BroadcastReceiver() {
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+
+            if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
+                UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                if (device != null) {
+                    // call the method that cleans up and closes communication with the device
+                    mConnectionHandler.onUsbStopped();
+                }
+            }
+        }
+    };
 
     /**
      * Activity is needed for onResult
@@ -44,64 +82,6 @@ public class UsbController {
         VID = vid;
         PID = pid;
         init();
-    }
-
-    private void init() {
-        enumerate(new IPermissionListener() {
-            @Override
-            public void onPermissionDenied(UsbDevice d) {
-                // this gets a notification on your screen asking you to let the app access the USB
-                UsbManager usbman = (UsbManager) mApplicationContext
-                        .getSystemService(Context.USB_SERVICE);
-                PendingIntent pi = PendingIntent.getBroadcast(
-                        mApplicationContext, 0, new Intent(
-                                ACTION_USB_PERMISSION), 0);
-                mApplicationContext.registerReceiver(mPermissionReceiver,
-                        new IntentFilter(ACTION_USB_PERMISSION));
-                mApplicationContext.registerReceiver(mUsbReceiver,new IntentFilter());
-                usbman.requestPermission(d, pi);
-            }
-        });
-    }
-
-    public void stop() {
-        mStop = true;
-        synchronized (sSendLock) {
-            sSendLock.notify();
-        }
-        try {
-            if(mUsbThread != null)
-                mUsbThread.join();
-        } catch (InterruptedException e) {
-            e(e);
-        }
-        mStop = false;
-        mLoop = null;
-        mUsbThread = null;
-
-        try{
-            mApplicationContext.unregisterReceiver(mPermissionReceiver);
-        }catch(IllegalArgumentException e){};//bravo
-    }
-
-    private UsbRunnable mLoop;
-    private Thread mUsbThread;
-
-    private void startHandler(UsbDevice d) {
-        if (mLoop != null) {
-            mConnectionHandler.onErrorLooperRunningAlready();
-            return;
-        }
-        mLoop = new UsbRunnable(d);
-        mUsbThread = new Thread(mLoop);
-        mUsbThread.start();
-    }
-
-    public void send(byte data) {
-        mData = data;
-        synchronized (sSendLock) {
-            sSendLock.notify();
-        }
     }
 
     private void enumerate(IPermissionListener listener) {
@@ -133,6 +113,65 @@ public class UsbController {
         Toast.makeText(mApplicationContext,"no more devices found",Toast.LENGTH_SHORT).show();
         l("no more devices found");
         mConnectionHandler.onDeviceNotFound();
+    }
+
+    private void init() {
+        enumerate(new IPermissionListener() {
+            @Override
+            public void onPermissionDenied(UsbDevice d) {
+                // this gets a notification on your screen asking you to let the app access the USB
+                UsbManager usbman = (UsbManager) mApplicationContext.getSystemService(Context.USB_SERVICE);
+                PendingIntent pi = PendingIntent.getBroadcast(
+                        mApplicationContext, 0, new Intent(ACTION_USB_PERMISSION), 0);
+                mApplicationContext.registerReceiver(mPermissionReceiver,
+                        new IntentFilter(ACTION_USB_PERMISSION));
+                mApplicationContext.registerReceiver(mUsbReceiver,new IntentFilter());
+                usbman.requestPermission(d, pi);
+            }
+        });
+    }
+
+    public void stop() {
+        mStop = true;
+        synchronized (sSendLock) {
+            sSendLock.notify();
+        }
+        try {
+            if(mUsbThread != null)
+                mUsbThread.join();
+        } catch (InterruptedException e) {
+            e(e);
+        }
+        mStop = false;
+        mLoop = null;
+        mUsbThread = null;
+
+        try{
+            mApplicationContext.unregisterReceiver(mPermissionReceiver);
+        }
+        catch(IllegalArgumentException e){
+            Log.e(TAG,"+e");
+        }
+    }
+
+    private UsbRunnable mLoop;
+    private Thread mUsbThread;
+
+    private void startHandler(UsbDevice d) {
+        if (mLoop != null) {
+            mConnectionHandler.onErrorLooperRunningAlready();
+            return;
+        }
+        mLoop = new UsbRunnable(d);
+        mUsbThread = new Thread(mLoop);
+        mUsbThread.start();
+    }
+
+    public void send(byte data) {
+        mData = data;
+        synchronized (sSendLock) {
+            sSendLock.notify();
+        }
     }
 
     private class PermissionReceiver extends BroadcastReceiver {
@@ -172,6 +211,7 @@ public class UsbController {
     private static final Object[] sSendLock = new Object[]{};//learned this trick from some google example :)
     //basically an empty array is lighter than an  actual new Object()...
     private boolean mStop = false;
+    // Used to send data to MCU
     private byte mData = 0x00;
 
     private class UsbRunnable implements Runnable {
@@ -185,16 +225,11 @@ public class UsbController {
         public void run() {
 
             //here the main USB functionality is implemented
-            //Toast.makeText(mApplicationContext,"Run started",Toast.LENGTH_SHORT).show();
             Log.i(TAG,"inside run of USB controller");
             UsbDeviceConnection conn = mUsbManager.openDevice(mDevice);
             if (!conn.claimInterface(mDevice.getInterface(1), true)) {
-                //Toast.makeText(mApplicationContext,"allow me to access the USB",Toast.LENGTH_SHORT).show();
                 return;
             }
-            // Arduino Serial usb Conv
-           // conn.controlTransfer(0x21, 34, 0, 0, null, 0, 0);
-           // conn.controlTransfer(0x21, 32, 0, 0, new byte[] { (byte) 0x80, 0x25, 0x00, 0x00, 0x00, 0x00, 0x08 }, 7, 0);
 
             conn.controlTransfer(0x40, 0, 0, 0, null, 0, 0);// reset
             // mConnection.controlTransfer(0×40,
@@ -212,8 +247,6 @@ public class UsbController {
             // stop bit
             // 1, tx off
 
-            //Toast.makeText(mApplicationContext,"control transfer sent",Toast.LENGTH_SHORT).show();
-
             UsbEndpoint epIN = null;
             UsbEndpoint epOUT = null;
 
@@ -226,8 +259,6 @@ public class UsbController {
                         epOUT = usbIf.getEndpoint(i);
                 }
             }
-
-            //Toast.makeText(mApplicationContext,"End points set",Toast.LENGTH_SHORT).show();
 
             for (;;) {// this is the main loop for transferring
                 synchronized (sSendLock) {//ok there should be a OUT queue, no guarantee that the byte is sent actually
@@ -242,36 +273,13 @@ public class UsbController {
                     }
                 }
 
-                //Toast.makeText(mApplicationContext,"before bulk transfer",Toast.LENGTH_SHORT).show();
-
-                //conn.bulkTransfer(epOUT, new byte[]{mData}, 1, 0);
-
                 // This is where it is meant to receive
                 byte[] buffer = new byte[1];
-
-                //StringBuilder str = new StringBuilder();
-                Log.i(TAG,"Before bulk transfer");
 
                 while (conn.bulkTransfer(epIN, buffer, 0,1, 0) >= 0) {
                     String temp = String.valueOf(buffer[0]);
                     Log.i(TAG,buffer[0]+ " " + temp);
-                   /*for (int i = 0; i < 1; i++) {
-                        Log.i(TAG, "" + buffer[i]);
-                        //String s1 = String.format("%8s", Integer.toBinaryString(buffer[i] & 0xFF)).replace(' ', '0');
-                        //Log.i(TAG," "+s1+" ");
-                        if (buffer[i] != 0) {
-                            Log.i(TAG," "+buffer[i]+" ");
-                        } else {
-                            Log.i(TAG,"Buffer is 0");
-                            Log.i(TAG," "+buffer[i]+" ");
-                            //break;
-                        }
-                    }*/
-
                 }
-
-                //Toast.makeText(mApplicationContext,"Eureka",Toast.LENGTH_SHORT).show();
-
 
                 if (mStop) {
                     mConnectionHandler.onUsbStopped();
@@ -282,39 +290,4 @@ public class UsbController {
     }
 
     // END MAIN LOOP
-    private BroadcastReceiver mPermissionReceiver = new PermissionReceiver(
-            new IPermissionListener() {
-                @Override
-                public void onPermissionDenied(UsbDevice d) {
-                    l("Permission denied on " + d.getDeviceId());
-                }
-            });
-
-    private static interface IPermissionListener {
-        void onPermissionDenied(UsbDevice d);
-    }
-
-    public final static String TAG = "USBController";
-
-    private void l(Object msg) {
-        Log.d(TAG, ">==< " + msg.toString() + " >==<");
-    }
-
-    private void e(Object msg) {
-        Log.e(TAG, ">==< " + msg.toString() + " >==<");
-    }
-
-    BroadcastReceiver mUsbReceiver = new BroadcastReceiver() {
-        public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-
-            if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
-                UsbDevice device = (UsbDevice)intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-                if (device != null) {
-                    // call your method that cleans up and closes communication with the device
-                    mConnectionHandler.onUsbStopped();
-                }
-            }
-        }
-    };
 }
